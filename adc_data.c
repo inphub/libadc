@@ -1,36 +1,43 @@
 /*
- * adc_proto_cmd.h
+ * drs_proto_cmd.h
  *
  *  Created on: 1 November 2022
  *      Author: Dmitriy Gerasimov <dmitry.gerasimov@demlabs.net>
  */
 
+#include <sys/stat.h>
 #include <unistd.h>
 #include <assert.h>
+#include <stdio.h>
+#include <fcntl.h>
+#include <errno.h>
+
+#include <dap_sdk.h>
 #include <dap_common.h>
+#include <dap_file_utils.h>
+#include <dap_strfuncs.h>
+#include <dap_string.h>
 
-#include "commands.h"
-#include "drs.h"
+#include "adc.h"
 #include "adc_data.h"
-#include "adc_ops.h"
 
-#define LOG_TAG "adc_data"
+#define LOG_TAG "drs_data"
 
 static bool s_debug_more=false;
 
 /**
- * @brief adc_data_get_all
- * @param a_drs    Если NULL то он копирует для всех DRS
+ * @brief drs_data_get_all
+ * @param a_drs    Р•СЃР»Рё NULL С‚Рѕ РѕРЅ РєРѕРїРёСЂСѓРµС‚ РґР»СЏ РІСЃРµС… DRS
  * @param a_flags
  * @param a_buffer
  * @return
  */
-int adc_data_get_all(adc_t * a_drs, int a_flags , unsigned short * a_buffer)
+int adc_data_get_page_first(drs_t * a_drs, int a_flags , unsigned short * a_buffer)
 {
     if (a_drs){
-        return adc_data_get(a_drs, a_flags, a_buffer, adc_CELLS_COUNT *sizeof(unsigned short) );
-    }else for (size_t d=0; d < adc_COUNT; d++){
-        int l_ret = adc_data_get(&g_drs[d],0,(unsigned short *) (((byte_t *) a_buffer) + adc_CELLS_COUNT *sizeof(unsigned short) ), adc_CELLS_COUNT *sizeof(unsigned short)  );
+        return drs_data_get_page_from_first(a_drs, a_flags, a_buffer, DRS_CELLS_COUNT *sizeof(unsigned short) );
+    }else for (size_t d=0; d < DRS_COUNT; d++){
+        int l_ret = drs_data_get_page_from_first(&g_drs[d],0,(unsigned short *) (((byte_t *) a_buffer) + DRS_CELLS_COUNT *sizeof(unsigned short) ), DRS_CELLS_COUNT *sizeof(unsigned short)  );
         if (l_ret!= 0){
             log_it(L_ERROR,"data not read on DRS #%u", d);
             return l_ret;
@@ -41,99 +48,94 @@ int adc_data_get_all(adc_t * a_drs, int a_flags , unsigned short * a_buffer)
 
 
 /**
- * @brief adc_data_get
- * @param a_drs                  Указатель на объект DRS
- * @param a_flags                Флаги операции
- * @param a_buffer               буфер данных, минимум adc_PAGE_READ_SIZE размера
- * @param a_buffer_size          максимальный размер данных для буфера (его размер)
+ * @brief drs_data_get_page
+ * @param a_drs
+ * @param a_flags
+ * @param a_page
+ * @param a_buffer
+ * @param a_buffer_size
+ * @return
  */
-int adc_data_get(adc_t * a_drs, int a_flags, unsigned short * a_buffer, size_t a_buffer_size )
+int drs_data_get_page(drs_t * a_drs, int a_flags ,unsigned a_page, unsigned short * a_buffer, size_t a_buffer_size)
 {
-    assert(a_drs);
-    assert(a_buffer);
-    unsigned int l_ret=0,i=0;
-    unsigned l_cmds = adc_CMD_INIT_SOFT_START | adc_CMD_START_DRS;
+  assert(a_drs);
+  assert(a_buffer);
+  unsigned int l_ret=0,i=0;
+  bool l_do_commands = a_flags & DRS_OP_FLAG_SOFT_START || a_flags & DRS_OP_FLAG_EXT_START;
 
-    if (a_flags & adc_OP_FLAG_EXT_START){
-        log_it(L_INFO, "start ext DRS");
-        l_cmds |= adc_CMD_ENABLE_EXT_PULSE;
-    }
+  if (l_do_commands ){
+      unsigned l_cmds = DRS_CMD_LOAD_N_RUN;
 
-    adc_cmd( -1, l_cmds);
-    //usleep(100);
+      if (a_flags & DRS_OP_FLAG_EXT_START){
+          log_it(L_INFO, "start ext DRS");
+          l_cmds |= DRS_CMD_EXT_START;
+      } else{
+          l_cmds |= DRS_CMD_SOFT_START;
+      }
 
-    bool l_is_ready = false;
-    bool l_loop = true;
-    while( l_loop ) {
-        l_is_ready = adc_get_flag_write_ready(a_drs->id);
-        if( l_is_ready)
-            break;
+      drs_cmd( -1, l_cmds);
+      //drs_cmd( a_drs->id, l_cmds);
 
-        i++;
-//        if( a_flags & adc_OP_FLAG_EXT_START){
-            if(i>100){
-                log_it(L_ERROR, "Was waiting for write_ready flag but without success");
-                l_loop = false;
-                l_ret = -1;
-            }
-//        }else{
-            //if(ext_start==0){end=1;)
-//        }
-        //readExternalStatus(0xc); //Peter fix
-    }
-    if(l_is_ready ){
-        debug_if(s_debug_more, L_DEBUG, "adc_data_get achieved on step #%u, DRS is %s", i, l_is_ready ? "ready" : "not ready");
-    }else
-        log_it(L_WARNING, "adc_data_get wasn't achieved after %u attempts, DRS is %s", i, l_is_ready ? "ready" : "not ready");
+      bool l_is_ready = drs_data_wait_for_ready(a_drs) == 0;
+      if(l_is_ready ){
+          debug_if(s_debug_more, L_DEBUG, "drs_data_get achieved on step #%u, DRS is %s", i, l_is_ready ? "ready" : "not ready");
+      }else{
+          log_it(L_WARNING, "drs_data_get wasn't achieved after %u attempts, DRS is %s", i, l_is_ready ? "ready" : "not ready");
+          //return -1;
+      }
+  }
 
-    if(a_flags & adc_OP_FLAG_ROTATE)
-        adc_read_page_rotated(a_drs, 0, a_buffer, a_buffer_size);
-    else
-        adc_read_page(a_drs, 0, a_buffer, a_buffer_size);
+  if(a_flags & DRS_OP_FLAG_ROTATE)
+      drs_read_page_rotated(a_drs, a_page, a_buffer, a_buffer_size);
+  else
+      drs_read_page(a_drs, a_page, a_buffer, a_buffer_size);
 
-    adc_set_flag_end_read(a_drs->id, true);
+  if( l_ret == 0 && l_do_commands ){
+      drs_set_flag_end_read(a_drs->id, true);
+  }
 
-#ifndef adc_OPT_DATA_GET_NODELAYS
-    usleep(adc_PAGE_READ_DELAY);
+#ifndef DRS_OPT_DATA_GET_NODELAYS
+  usleep(DRS_PAGE_READ_DELAY);
 #endif
 
-    return l_ret;
+  return l_ret;
+
 }
 
 
 /**
- * @brief adc_read_page
+ * @brief drs_read_page
  * @param a_drs
  * @param a_page_num
  * @param a_buffer
  * @param a_buffer_size
  */
-void adc_read_page(adc_t * a_drs,unsigned int a_page_num,  unsigned short *a_buffer, size_t a_buffer_size)
+void drs_read_page(drs_t * a_drs,unsigned int a_page_num,  unsigned short *a_buffer, size_t a_buffer_size)
 {
     assert(a_drs);
     assert(a_buffer);
     if ( a_drs->id ==0 )
-        memcpy(a_buffer, (unsigned short *) ( ((byte_t*)data_map_drs1 )+ a_page_num*adc_PAGE_READ_SIZE), a_buffer_size ) ;
+        memcpy(a_buffer,  ((byte_t*)data_map_drs1 )+ a_page_num*DRS_PAGE_READ_SIZE, a_buffer_size ) ;
     else
-       memcpy(a_buffer, (unsigned short *) ( ((byte_t*)data_map_drs2 )+ a_page_num*adc_PAGE_READ_SIZE), a_buffer_size ) ;
-    a_drs->shift =adc_get_shift( a_drs->id);
+       memcpy(a_buffer, ((byte_t*)data_map_drs2 )+ a_page_num*DRS_PAGE_READ_SIZE, a_buffer_size ) ;
+    a_drs->shift =drs_get_shift( a_drs->id, a_page_num);
     a_drs->shift_bank =a_drs->shift & 1023;
 
-    //log_it(L_DEBUG, "Global shift: %u , local shift: %u",adc_get_shift(a_drs->id), a_drs->shift);
+    //log_it(L_DEBUG, "Global shift: %u , local shift: %u",drs_get_shift(a_drs->id), a_drs->shift);
 
 }
 
 
-void adc_data_rotate(adc_t * a_drs, const void * a_mem_in, void * a_mem_out, size_t a_mem_size, const size_t a_cell_size)
+void drs_data_rotate_bank(drs_t * a_drs, const void * a_mem_in, void * a_mem_out, size_t a_mem_size, const size_t a_cell_size)
 {
     assert(a_drs);
     assert(a_mem_in);
     assert(a_mem_out);
     assert(a_cell_size);
     unsigned int l_shift_global = a_drs->shift;
-    unsigned int l_shift = adc_CELLS_COUNT_BANK - a_drs->shift_bank;
+    unsigned int l_shift = DRS_CELLS_COUNT_BANK - a_drs->shift_bank;
 
-    log_it(L_DEBUG, "Global shift: %u , local shift: %u",l_shift_global, l_shift);
+    //log_it(L_DEBUG, "Global shift: %u , local shift: %u",l_shift_global, l_shift);
 
     size_t l_total_size = 0;
     size_t l_in_offset, l_out_offset;
@@ -142,31 +144,31 @@ void adc_data_rotate(adc_t * a_drs, const void * a_mem_in, void * a_mem_out, siz
     byte_t * l_buf_out =  DAP_NEW_STACK_SIZE(byte_t, a_mem_size);
     memset(l_buf_out,0, a_mem_size);
 
-    // Разворачиваем внутри банков
-    for(unsigned b = 0; b < adc_CHANNEL_BANK_COUNT && l_total_size < a_mem_size; b++){
-        size_t l_bank_shift = b*adc_CELLS_COUNT_BANK * adc_CHANNELS_COUNT *a_cell_size; // смещение банка
-        size_t l_copy_size = (adc_CELLS_COUNT_BANK - l_shift) * a_cell_size * adc_CHANNELS_COUNT;
+    // Р Р°Р·РІРѕСЂР°С‡РёРІР°РµРј РІРЅСѓС‚СЂРё Р±Р°РЅРєРѕРІ
+    for(unsigned b = 0; b < DRS_CHANNEL_BANK_COUNT && l_total_size < a_mem_size; b++){
+        size_t l_bank_shift = b*DRS_CELLS_COUNT_BANK * DRS_CHANNELS_COUNT *a_cell_size; // СЃРјРµС‰РµРЅРёРµ Р±Р°РЅРєР°
+        size_t l_copy_size = (DRS_CELLS_COUNT_BANK - l_shift) * a_cell_size * DRS_CHANNELS_COUNT;
 
-        if (l_copy_size + l_total_size > a_mem_size ) // Проверяем на предмет выхода за пределы буфера
+        if (l_copy_size + l_total_size > a_mem_size ) // РџСЂРѕРІРµСЂСЏРµРј РЅР° РїСЂРµРґРјРµС‚ РІС‹С…РѕРґР° Р·Р° РїСЂРµРґРµР»С‹ Р±СѓС„РµСЂР°
             l_copy_size = a_mem_size - l_total_size;
-        // Копируем головной кусок
+        // РљРѕРїРёСЂСѓРµРј РіРѕР»РѕРІРЅРѕР№ РєСѓСЃРѕРє
         l_out_offset = l_bank_shift;
-        l_in_offset = l_bank_shift + l_shift*adc_CHANNELS_COUNT*a_cell_size;
+        l_in_offset = l_bank_shift + l_shift*DRS_CHANNELS_COUNT*a_cell_size;
         if(l_copy_size){
             memcpy( l_buf_out + l_out_offset,  l_buf_in + l_in_offset , l_copy_size ) ;
             l_total_size += l_copy_size;
         }
 
-        // проверяем, не всё ли это
+        // РїСЂРѕРІРµСЂСЏРµРј, РЅРµ РІСЃС‘ Р»Рё СЌС‚Рѕ
         if(l_total_size >= a_mem_size)
             break;
 
 
-        // считаем размер хвостика
-        unsigned l_copy_size_tail = ( (adc_CELLS_COUNT_BANK * a_cell_size* adc_CHANNELS_COUNT) - l_copy_size);
-        if ( (l_copy_size_tail + l_total_size) > a_mem_size ) // Проверяем на предмет выхода за пределы буфера
+        // СЃС‡РёС‚Р°РµРј СЂР°Р·РјРµСЂ С…РІРѕСЃС‚РёРєР°
+        unsigned l_copy_size_tail = ( (DRS_CELLS_COUNT_BANK * a_cell_size* DRS_CHANNELS_COUNT) - l_copy_size);
+        if ( (l_copy_size_tail + l_total_size) > a_mem_size ) // РџСЂРѕРІРµСЂСЏРµРј РЅР° РїСЂРµРґРјРµС‚ РІС‹С…РѕРґР° Р·Р° РїСЂРµРґРµР»С‹ Р±СѓС„РµСЂР°
             l_copy_size_tail = a_mem_size - l_total_size;
-        // копируем хвостик
+        // РєРѕРїРёСЂСѓРµРј С…РІРѕСЃС‚РёРє
         l_out_offset += l_copy_size ;
         l_in_offset = l_bank_shift;
         //memset( l_buf_out + l_out_offset, 0, l_copy_size_tail ) ;
@@ -176,83 +178,191 @@ void adc_data_rotate(adc_t * a_drs, const void * a_mem_in, void * a_mem_out, siz
 
     }
 
-    //memcpy(a_mem_out, l_buf_out, a_mem_size);
-    // Разворачиваем глобально всё
-    unsigned l_head_size = (adc_CELLS_COUNT_CHANNEL - l_shift_global) * a_cell_size * adc_CHANNELS_COUNT;
-    memcpy(a_mem_out, l_buf_out + l_shift_global* a_cell_size * adc_CHANNELS_COUNT , l_head_size  );
-    memcpy(((byte_t*)a_mem_out) + l_head_size, l_buf_out, l_shift_global * a_cell_size * adc_CHANNELS_COUNT );
+    memcpy(a_mem_out, l_buf_out,a_mem_size );
+
+}
+
+/**
+ * @brief drs_data_rotate_global
+ * @param a_drs
+ * @param a_mem_in
+ * @param a_mem_out
+ * @param a_mem_size
+ * @param a_cell_size
+ */
+void drs_data_rotate_global(drs_t * a_drs, const void * a_mem_in, void * a_mem_out, size_t a_mem_size, const size_t a_cell_size)
+{
+  assert(a_drs);
+  assert(a_mem_in);
+  assert(a_mem_out);
+  assert(a_cell_size);
+  unsigned int l_shift_global = a_drs->shift;
+  byte_t * l_buf_out =  DAP_NEW_STACK_SIZE(byte_t, a_mem_size);
+  memset(l_buf_out,0, a_mem_size);
+
+  //memcpy(a_mem_out, l_buf_out, a_mem_size);
+  // Р Р°Р·РІРѕСЂР°С‡РёРІР°РµРј РіР»РѕР±Р°Р»СЊРЅРѕ РІСЃС‘
+  unsigned l_head_size = (DRS_CELLS_COUNT_CHANNEL - l_shift_global) * a_cell_size * DRS_CHANNELS_COUNT;
+  memcpy(l_buf_out, a_mem_in + l_shift_global* a_cell_size * DRS_CHANNELS_COUNT , l_head_size  );
+  memcpy(l_buf_out + l_head_size, a_mem_in, l_shift_global * a_cell_size * DRS_CHANNELS_COUNT );
+
+  memcpy(a_mem_out, l_buf_out,a_mem_size );
+}
+
+
+void drs_data_rotate_bank9(drs_t * a_drs, const void * a_mem_in, void * a_mem_out, size_t a_mem_size, const size_t a_cell_size)
+{
+  assert(a_drs);
+  assert(a_mem_in);
+  assert(a_mem_out);
+  assert(a_cell_size);
+  unsigned int l_shift = a_drs->shift_bank+1;
+  byte_t * l_buf_out =  DAP_NEW_STACK_SIZE(byte_t, a_mem_size );
+  memset(l_buf_out,0, a_mem_size);
+
+  //memcpy(a_mem_out, l_buf_out, a_mem_size);
+  // Р Р°Р·РІРѕСЂР°С‡РёРІР°РµРј 9С‹Р№ РєР°РЅР°Р»
+  unsigned l_head_size = (DRS_CELLS_COUNT_BANK - l_shift) * a_cell_size * DRS_CHANNELS_COUNT;
+  memcpy(l_buf_out, ((byte_t*) a_mem_in)  + l_shift* a_cell_size * DRS_CHANNELS_COUNT , l_head_size  );
+  memcpy(l_buf_out + l_head_size, a_mem_in ,
+         l_shift * a_cell_size * DRS_CHANNELS_COUNT );
+
+  memcpy(a_mem_out, l_buf_out,a_mem_size );
 }
 
 
 
+
 /**
- * @brief adc_read_page_rotated
+ * @brief drs_read_page_rotated
  * @param a_drs
  * @param a_page_num
  * @param a_buffer
  * @param a_buffer_size
  */
-void adc_read_page_rotated(adc_t * a_drs,unsigned int a_page_num,  unsigned short *a_buffer,const size_t a_buffer_size)
+void drs_read_page_rotated(drs_t * a_drs,unsigned int a_page_num,  unsigned short *a_buffer,const size_t a_buffer_size)
 {
     assert(a_drs);
     assert(a_buffer);
-    byte_t * a_adc_mem = a_drs->id == 0 ? (byte_t*)data_map_drs1 : (byte_t*)data_map_drs2;
-    unsigned short * a_adc_page =(unsigned short *) (a_adc_mem + a_page_num*adc_PAGE_READ_SIZE);
+    byte_t * a_drs_mem = a_drs->id == 0 ? (byte_t*)data_map_drs1 : (byte_t*)data_map_drs2;
+    unsigned short * a_drs_page =(unsigned short *) (a_drs_mem + a_page_num*DRS_PAGE_READ_SIZE);
 
-    adc_data_rotate(a_drs, a_adc_page, a_buffer, a_buffer_size, sizeof(unsigned short));
+    drs_data_rotate_bank(a_drs, a_drs_page, a_buffer, a_buffer_size, sizeof(unsigned short));
 }
 
 
 
 /**
- * @brief adc_read_pages
+ * @brief drs_read_pages
  * @param a_drs
  * @param a_page_count
- * @param a_step
+ * @param a_offset
  * @param a_buffer
  * @param a_buffer_size
  */
-void adc_read_pages(adc_t * a_drs, unsigned int a_page_count, unsigned int a_step,  unsigned short *a_buffer, size_t a_buffer_size)
+void drs_read_pages(drs_t * a_drs, unsigned int a_page_count, unsigned int a_offset,  unsigned short *a_buffer, size_t a_buffer_size)
 {
     size_t l_offset = 0;
     bool l_loop = true;
     for (unsigned t=0; t< a_page_count && l_loop; t++){
         size_t l_read_size;
-        if (l_offset + adc_PAGE_READ_SIZE <= a_buffer_size)
-            l_read_size = adc_PAGE_READ_SIZE;
+        if (l_offset + DRS_PAGE_READ_SIZE <= a_buffer_size)
+            l_read_size = DRS_PAGE_READ_SIZE;
         else{
             l_read_size = a_buffer_size - l_offset;
             l_loop = false;
             log_it(L_ERROR, "Page read function goes out of input buffer, size %zd is not enought, requires %zd ( page read size %zd, num pages %u",
-                    a_buffer_size, a_page_count * adc_PAGE_READ_SIZE, adc_PAGE_READ_SIZE, a_page_count );
+                    a_buffer_size, a_page_count * DRS_PAGE_READ_SIZE, DRS_PAGE_READ_SIZE, a_page_count );
         }
-        adc_read_page(a_drs,t,&a_buffer[t*a_step], l_read_size);
+        drs_read_page(a_drs,t,&a_buffer[t*a_offset], l_read_size);
     }
 }
 
 
 
 /**
- * unsigned int drsnum		номер drs для вычитывания сдвига
- * return 					индекс сдвига;
+ * unsigned int drsnum		РЅРѕРјРµСЂ drs РґР»СЏ РІС‹С‡РёС‚С‹РІР°РЅРёСЏ СЃРґРІРёРіР°
+ * return 					РёРЅРґРµРєСЃ СЃРґРІРёРіР°;
  */
-unsigned int adc_get_shift_bank(unsigned int a_adc_num)
+unsigned int drs_get_shift_bank(unsigned int a_drs_num, unsigned int a_page_num)
 {
-    return adc_get_shift(a_adc_num) &1023;
+    return drs_get_shift(a_drs_num, a_page_num) &1023;
 }
 
 /**
- * @brief adc_get_shift
- * @param a_adc_num
+ * @brief drs_get_shift
+ * @param a_drs_num
  * @return
  */
-unsigned int adc_get_shift(unsigned int a_adc_num)
+unsigned int drs_get_shift(unsigned int a_drs_num, unsigned int a_page_num)
 {
     unsigned short tmpshift;
-    if (a_adc_num==0)
-     tmpshift=((unsigned long *)data_map_shift_drs1)[0];
+    if (a_drs_num==0)
+     tmpshift=((uint32_t *)data_map_shift_drs1)[a_page_num];
     else
-     tmpshift=((unsigned long *)data_map_shift_drs2)[0];
+     tmpshift=((uint32_t *)data_map_shift_drs2)[a_page_num];
+    return tmpshift & 4095;
+}
 
-    return tmpshift;
+int adc_data_dump_in_files(const char * a_filename, const double * a_data, size_t a_data_count, int a_flags)
+{
+
+    dap_string_t * l_file = dap_string_new("");
+
+    // Р”РѕР±Р°РІР»СЏРµРј РїСѓС‚СЊ РґРѕ var/lib РІРЅСѓС‚СЂРё РїР°РїРєРё РїСЂРёР»РѕР¶РµРЅРёСЏ
+    if ( a_flags & ADC_DATA_DUMP_ADD_PATH_VAR_LIB ){
+        char * l_path = dap_strdup_printf("%s/var/lib",g_dap_vars.core.sys_dir);
+        dap_mkdir_with_parents(l_path);
+        dap_string_append_printf(l_file, "%s/", l_path);
+    }
+
+    // Р”РѕР±Р°РІР»СЏРµРј СЃРѕР±СЃС‚РІРµРЅРЅРѕ РёРјСЏ С„Р°Р№Р»Р°
+    dap_string_append(l_file, a_filename);
+
+    // Р”РѕР±Р°РІР»СЏРµРј РІСЂРµРјСЏ РІ СЋРЅРёРєСЃ С„РѕСЂРјР°С‚Рµ
+    if (a_flags & ADC_DATA_DUMP_ADD_TIMESTAMP ){
+        dap_nanotime_t l_ts = dap_nanotime_now();
+        //char l_ts_str[64]={0};
+        //dap_nanotime_to_str(&l_ts,l_ts_str);
+        dap_string_append_printf(l_file,"_%"DAP_UINT64_FORMAT_U"_",l_ts );
+    }
+
+
+    // РћС‚РєСЂС‹РІР°РµРј CSV С„Р°Р№Р» Рё РїРёС€РµРј РІ РЅРµРіРѕ
+
+    if (a_flags & DRS_DATA_DUMP_CSV){
+        dap_string_t * l_fstr = dap_string_new( l_file->str);
+        // Р”РѕР±Р°РІР»СЏРµРј СЂР°СЃС€РёСЂРµРЅРёРµ
+        dap_string_append(l_fstr, ".csv");
+        char * l_file_str = dap_string_free(l_fstr, false);
+
+
+        FILE * f = fopen(l_file_str,"w");
+        for (size_t n = 0; n < a_data_count; n++){
+            fprintf(f,"%lf;", a_data[n]);
+        }
+        fclose(f);
+
+        DAP_DELETE(l_file_str);
+    }
+
+    // РћС‚РєСЂС‹РІР°РµРј BIN С„Р°Р№Р» Рё РїРёС€РµРј РІ РЅРµРіРѕ
+    if (a_flags & DRS_DATA_DUMP_BIN){
+        dap_string_t * l_fstr = dap_string_new( l_file->str);
+        // Р”РѕР±Р°РІР»СЏРµРј СЂР°СЃС€РёСЂРµРЅРёРµ
+        dap_string_append(l_fstr, ".bin");
+        char * l_file_str = dap_string_free(l_fstr, false);
+
+        FILE * f = fopen(l_file_str,"w");
+        for (size_t n = 0; n < a_data_count; n++){
+            fwrite(&a_data[n],sizeof (a_data[n]),1, f);
+        }
+        fclose(f);
+
+        DAP_DELETE(l_file_str);
+    }
+
+    dap_string_free(l_file, true);
+
+    return 0;
 }
